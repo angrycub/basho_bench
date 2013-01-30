@@ -55,20 +55,6 @@ new(Id) ->
             ok
     end,
 
-    case basho_bench_config:get(http_use_ssl, false) of
-        false ->
-            ok;
-        _ ->
-            case ssl:start() of
-                ok ->
-                    ok;
-                {error, {already_started, ssl}} ->
-                    ok;
-                _ ->
-                    ?FAIL_MSG("Unable to enable SSL support.\n", [])
-            end
-    end,
-
     %% Setup client ID by base-64 encoding the ID
     ClientId = {'X-Riak-ClientId', base64:encode(<<Id:32/unsigned>>)},
     ?DEBUG("Client ID: ~p\n", [ClientId]),
@@ -190,6 +176,27 @@ run(update_existing, KeyGen, ValueGen, State) ->
                     {error, Reason, S2}
             end
     end;
+
+run(delete, KeyGen, _ValueGen, State) ->
+    {NextUrl, S2} = next_url(State),
+    case do_get(url(NextUrl, KeyGen, State#state.path_params)) of
+        {error, Reason} ->
+            {error, Reason, S2};
+
+        {not_found, Url} ->
+            {error, {not_found, Url}, S2};
+
+        {ok, Url, Headers} ->
+            case do_delete(Url, _, _) of
+                ok ->
+                    {ok, S2};
+                {error, Reason} ->
+                    {error, Reason, S2}
+            end
+    end;
+    
+    
+    
 run(insert, KeyGen, ValueGen, State) ->
     %% Go ahead and evaluate the keygen so that we can use the
     %% sequential_int_gen to do a controlled # of inserts (if we desire). Note
@@ -371,6 +378,21 @@ do_put(Url, Headers, ValueGen) ->
             {error, Reason}
     end.
 
+do_delete(Url, Headers, ValueGen) ->
+    Val = if is_function(ValueGen) ->
+                  ValueGen();
+             true ->
+                  ValueGen
+          end,
+    case send_request(Url, Headers, delete, Val, [{response_format, binary}]) of
+        {ok, "204", _Header, _Body} ->
+            ok;
+        {ok, Code, _Header, _Body} ->
+            {error, {http_error, Code}};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
 do_post(Url, Headers, ValueGen) ->
     case send_request(Url, Headers ++ [{'Content-Type', 'application/octet-stream'}],
                       post, ValueGen(), [{response_format, binary}]) of
@@ -463,15 +485,7 @@ send_request(_Url, _Headers, _Method, _Body, _Options, 0) ->
     {error, max_retries};
 send_request(Url, Headers, Method, Body, Options, Count) ->
     Pid = connect(Url),
-    Options2 = case basho_bench_config:get(http_use_ssl, false) of
-                   false ->
-                       Options;
-                   true ->
-                       [{is_ssl, true}, {ssl_options, []} | Options];
-                   SSLOpts when is_list(SSLOpts) ->
-                       [{is_ssl, true}, {ssl_options, SSLOpts} | Options]
-               end,
-    case catch(ibrowse_http_client:send_req(Pid, Url, Headers, Method, Body, Options2, basho_bench_config:get(http_raw_request_timeout, 5000))) of
+    case catch(ibrowse_http_client:send_req(Pid, Url, Headers, Method, Body, Options, basho_bench_config:get(http_raw_request_timeout, 5000))) of
         {ok, Status, RespHeaders, RespBody} ->
             maybe_disconnect(Url),
             {ok, Status, RespHeaders, RespBody};
